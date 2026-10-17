@@ -107,6 +107,16 @@ bool MqttPublisher::publishRecord(const EnergyRecord &record) {
 	return client.publish(topic, payload, false, 1);
 }
 
+bool MqttPublisher::publish(const char *subtopic, const char *payload) {
+	if (!client.connected()) {
+		return false;
+	}
+
+	char topic[64];
+	snprintf(topic, sizeof(topic), "%s/%s", baseTopic, subtopic);
+	return client.publish(topic, payload, false, 1);
+}
+
 // ISO 8601 local time with UTC offset, e.g. 2026-10-18T14:00:00+03:00
 void MqttPublisher::formatTime(uint32_t t, char *buf, size_t size) {
 	time_t tt = t;

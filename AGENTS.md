@@ -11,7 +11,7 @@ the hardware UART and exposes the values over HTTP. PlatformIO project (Arduino 
 
 - Device: static IP `192.168.100.23`
 - Logs: JSON over UDP to `192.168.100.134:5000` / `:5010` (`lib/Logger`)
-- HTTP API: `GET /` (info + upload form), `GET /data` (readings), `GET /health`, `POST /update` (OTA)
+- HTTP API: `GET /` (info + upload form), `GET /data` (readings), `GET /health`, `GET /mqtt/test` (test MQTT publish), `POST /update` (OTA)
 - MQTT: energy per hour/day/ISO week/month to Mosquitto `192.168.100.3:1883`, topics
   `energy-meter/...`, local time Europe/Chisinau from NTP. Contract: [docs/MQTT.md](docs/MQTT.md)
 
@@ -97,8 +97,8 @@ The "Flash: 1023984 bytes" figure in the build output is the **serial-flash** li
 
 1. **Hard limit (this upload):** `round_up_4k(running) + round_up_4k(new) <= 1,024,000`.
    If the new image is larger than the running one, use the size of the running one.
-   The running firmware is 352,672 bytes as of 2026-10-18 (MQTT reports), so the new
-   `firmware.bin` must be at most **667,648 bytes**.
+   The running firmware is 356,816 bytes as of 2026-10-18 (MQTT test endpoint), so the new
+   `firmware.bin` must be at most **663,552 bytes**.
 2. **Safe limit (every future upload):** `firmware.bin <= 512,000 bytes` (125 sectors).
    Below this size, any firmware can be replaced over OTA by any other firmware of the same
    size. Firmware above 512,000 bytes may flash once but then cannot be OTA-updated, so the

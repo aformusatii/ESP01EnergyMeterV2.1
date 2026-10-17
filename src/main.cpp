@@ -5,6 +5,7 @@
  *   GET  /        - device info page + firmware upload form
  *   GET  /data    - PZEM readings as JSON
  *   GET  /health  - {"status":"UP"}
+ *   GET  /mqtt/test[?msg=text] - publishes a test message to <base>/test (for testing the broker path)
  *   POST /update  - OTA firmware update (ESP8266HTTPUpdateServer)
  *
  * MQTT (see include/AppConfig.h): consumed energy per local hour, day, ISO week and month,
@@ -55,6 +56,7 @@ void setupHTTPActions();
 void setupAfterWiFiConnected();
 
 void health();
+void mqttTest();
 void sendSensorData();
 void writeJson(int httpStatus, const JsonDocument &doc);
 void energyLoop(time_t now);
@@ -116,6 +118,7 @@ void setupHTTPActions() {
 
 	server.on("/data", HTTP_GET, sendSensorData);
 	server.on("/health", HTTP_GET, health);
+	server.on("/mqtt/test", HTTP_ANY, mqttTest);
 
 	// Not found handler
 	server.onNotFound(handleNotFound);
@@ -135,6 +138,52 @@ void health() {
 	rootDoc["dropped"] = tracker.dropped();
 	rootDoc["heap"] = ESP.getFreeHeap();
 	writeJson(200, rootDoc);
+}
+
+// longer messages are cut so the payload fits the 256 byte MQTT write buffer
+#define MQTT_TEST_MSG_MAX  100
+
+void mqttTest() {
+	char now[32];
+	MqttPublisher::formatTime((uint32_t) time(nullptr), now, sizeof(now));
+
+	JsonDocument msg;
+	msg["test"] = true;
+	msg["time"] = now;
+	msg["time_synced"] = timeSynced;
+	msg["uptime_ms"] = millis();
+	msg["heap"] = ESP.getFreeHeap();
+	if (server.hasArg("msg")) {
+		msg["msg"] = server.arg("msg").substring(0, MQTT_TEST_MSG_MAX);
+	}
+
+	char payload[230];
+	serializeJson(msg, payload, sizeof(payload));
+
+	JsonDocument rootDoc;
+	rootDoc["topic"] = MQTT_BASE_TOPIC "/test";
+	rootDoc["payload"] = payload;
+
+	int status = 200;
+	if (!mqtt.connected()) {
+		// the connection is only opened once NTP has synced
+		status = 503;
+		rootDoc["success"] = false;
+		rootDoc["error"] = timeSynced ? "MQTT not connected" : "MQTT not connected (waiting for NTP time)";
+	} else if (!mqtt.publish("test", payload)) {
+		status = 502;
+		rootDoc["success"] = false;
+		rootDoc["error"] = "MQTT publish failed";
+		rootDoc["mqtt_error"] = mqtt.lastError();
+	} else {
+		rootDoc["success"] = true;
+	}
+
+	writeJson(status, rootDoc);
+
+	JsonDocument logDoc;
+	logDoc["success"] = rootDoc["success"];
+	logger.info(logDoc, "MQTT test publish");
 }
 
 void writeJson(int httpStatus, const JsonDocument &doc) {

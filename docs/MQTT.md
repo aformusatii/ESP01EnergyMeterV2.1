@@ -12,6 +12,12 @@ The meter publishes the energy consumed per local calendar period to the Mosquit
 | `energy-meter/energy/day`    | no       | 1   | local midnight                                    |
 | `energy-meter/energy/week`   | no       | 1   | Monday 00:00 (ISO week)                           |
 | `energy-meter/energy/month`  | no       | 1   | 1st of the month 00:00                            |
+| `energy-meter/test`          | no       | 1   | on demand: `GET http://192.168.100.23/mqtt/test[?msg=text]` |
+
+`energy-meter/test` is for checking the device -> broker -> consumer path. The payload is
+`{"test":true,"time":"...","time_synced":true,"uptime_ms":...,"heap":...,"msg":"text"}`
+(`msg` only if given, cut to 100 characters). The HTTP reply has `success` (PUBACK received),
+`topic` and `payload`; 503 means no MQTT connection (it opens only after NTP sync).
 
 When boundaries coincide (every midnight closes an hour and a day; a Monday or the 1st of a
 month also closes a week or month), the records arrive together, shortest period first.

@@ -22,6 +22,7 @@
  * Topics:
  *   <base>/availability     {"state":"online"|"offline"}  retained, offline via last will
  *   <base>/energy/<period>  one JSON record per finished period (hour, day, week, month)
+ *   <base>/test             test message on demand (GET /mqtt/test), not retained
  */
 class MqttPublisher {
 
@@ -53,6 +54,11 @@ class MqttPublisher {
 		void loop(unsigned long current_time, EnergyPeriods &tracker);
 
 		bool connected(void) { return client.connected(); }
+
+		// Publishes payload to <base>/<subtopic> with QoS 1, not retained.
+		// Returns false when not connected or not acknowledged.
+		bool publish(const char *subtopic, const char *payload);
+		int lastError(void) { return (int) client.lastError(); }
 
 		static void formatTime(uint32_t t, char *buf, size_t size);
 };
