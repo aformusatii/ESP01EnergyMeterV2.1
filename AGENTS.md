@@ -12,14 +12,21 @@ the hardware UART and exposes the values over HTTP. PlatformIO project (Arduino 
 - Device: static IP `192.168.100.23`
 - Logs: JSON over UDP to `192.168.100.134:5000` / `:5010` (`lib/Logger`)
 - HTTP API: `GET /` (info + upload form), `GET /data` (readings), `GET /health`, `POST /update` (OTA)
+- MQTT: energy per hour/day/ISO week/month to Mosquitto `192.168.100.3:1883`, topics
+  `energy-meter/...`, local time Europe/Chisinau from NTP. Contract: [docs/MQTT.md](docs/MQTT.md)
 
 ```
 src/main.cpp          application: HTTP routes, PZEM readout
 lib/WiFiHelper        WiFi connect, static IP, status LED, reconnect watchdog
 lib/ServerHelper      index page / 404 handler
 lib/Logger            JSON UDP logger
+lib/EnergyPeriods     PZEM counter -> per-period records + RAM queue (no Arduino deps, host-tested)
+lib/MqttPublisher     MQTT connection with backoff, drains the queue with QoS 1
+include/AppConfig.h   MQTT broker, topic, timezone, NTP servers
 include/WiFiConfig.h  local WiFi credentials (git-ignored; copy from WiFiConfig.example.h)
 scripts/ota_upload.py PlatformIO custom upload: POSTs firmware.bin to /update
+scripts/mqtt_monitor.py  prints the MQTT topics (pip install paho-mqtt)
+test/host/            host unit test for lib/EnergyPeriods
 platformio.ini        envs: esp01_1m (serial, COM5) and esp01_1m_ota (WiFi)
 ```
 
@@ -27,6 +34,7 @@ Hardware constraints to keep in mind:
 - UART (GPIO1/3) belongs to the PZEM. Do not use `Serial` for debug output; log via `Logger` (UDP).
 - The blue LED is GPIO2 (`-DLED_BUILTIN=2` in `platformio.ini`).
 - Flash is 1 MB with no filesystem (`eagle.flash.1m.ld`). All free space is reserved for OTA.
+- RTC user memory: blocks 0-31 belong to the OTA bootloader; the energy tracker state lives at block 64.
 
 ## Build
 
@@ -34,6 +42,12 @@ The PlatformIO CLI is at `~/.platformio/penv/Scripts/pio` and is on PATH.
 
 ```sh
 pio run -e esp01_1m_ota          # build only (the OTA env refuses placeholder WiFi credentials)
+```
+
+Host test for the period logic (needs g++ with POSIX TZ support, e.g. Cygwin at `C:/cygwin64/bin`):
+
+```sh
+g++ -std=gnu++17 -Wall -I lib/EnergyPeriods/src test/host/test_energy_periods.cpp     lib/EnergyPeriods/src/EnergyPeriods.cpp -o .pio/test_energy_periods && .pio/test_energy_periods
 ```
 
 ## OTA upload
@@ -83,8 +97,8 @@ The "Flash: 1023984 bytes" figure in the build output is the **serial-flash** li
 
 1. **Hard limit (this upload):** `round_up_4k(running) + round_up_4k(new) <= 1,024,000`.
    If the new image is larger than the running one, use the size of the running one.
-   The running firmware is 330,288 bytes as of 2026-10-18, so the new `firmware.bin` must
-   be at most **692,224 bytes**.
+   The running firmware is 352,672 bytes as of 2026-10-18 (MQTT reports), so the new
+   `firmware.bin` must be at most **667,648 bytes**.
 2. **Safe limit (every future upload):** `firmware.bin <= 512,000 bytes` (125 sectors).
    Below this size, any firmware can be replaced over OTA by any other firmware of the same
    size. Firmware above 512,000 bytes may flash once but then cannot be OTA-updated, so the

@@ -6,6 +6,9 @@
  *   GET  /data    - PZEM readings as JSON
  *   GET  /health  - {"status":"UP"}
  *   POST /update  - OTA firmware update (ESP8266HTTPUpdateServer)
+ *
+ * MQTT (see include/AppConfig.h): consumed energy per local hour, day, ISO week and month,
+ * published at each period end once the clock is synced over NTP.
  */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -13,10 +16,13 @@
 #include <ESP8266HTTPUpdateServer.h>
 #include <ArduinoJson.h>
 #include <PZEM004Tv30.h>
+#include <coredecls.h>
 
 #include "WiFiHelper.h"
 #include "ServerHelper.h"
 #include "Logger.h"
+#include "EnergyPeriods.h"
+#include "MqttPublisher.h"
 
 #if __has_include("WiFiConfig.h")
 #include "WiFiConfig.h"
@@ -27,6 +33,22 @@
 #include "WiFiConfig.example.h"
 #endif
 
+#include "AppConfig.h"
+
+#ifndef MQTT_USER
+#define MQTT_USER nullptr
+#define MQTT_PASSWORD nullptr
+#endif
+
+// any time before this means NTP has not synced yet
+#define TIME_VALID_AFTER  1700000000
+#define ENERGY_CHECK_INTERVAL_MS  1000
+
+// RTC user memory survives reset and OTA reboot (not power loss). The first 128 bytes
+// are used by the OTA bootloader command, so start at block 64 (byte 256).
+#define RTC_STATE_OFFSET  64
+#define RTC_STATE_MAGIC   0x454E5031  // "ENP1"
+
 void indexPage();
 void handleNotFound();
 void setupHTTPActions();
@@ -35,6 +57,9 @@ void setupAfterWiFiConnected();
 void health();
 void sendSensorData();
 void writeJson(int httpStatus, const JsonDocument &doc);
+void energyLoop(time_t now);
+void loadTrackerState();
+void saveTrackerState();
 
 
 WiFiHelper wiFiHelper;
@@ -42,6 +67,17 @@ ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
 ServerHelper serverHelper("ESP01EnergyMeterV2.1", &server);
 Logger logger;
+EnergyPeriods tracker;
+MqttPublisher mqtt;
+
+struct RtcBlob {
+	uint32_t magic;
+	EnergyTrackerState state;
+	uint32_t crc;
+};
+
+unsigned long energy_check_timer = 0;
+bool timeSynced = false;
 
 // PZEM is wired to the hardware UART (GPIO1/GPIO3), so Serial must not be used for debug output
 PZEM004Tv30 pzem(Serial);
@@ -57,6 +93,12 @@ void setup()
 
 	wiFiHelper.begin(LOCAL_SSID, LOCAL_KEY, setupAfterWiFiConnected);
 	wiFiHelper.setupLedStatus(LED_BUILTIN);
+
+	// SNTP starts by itself once WiFi is up and re-syncs periodically
+	configTime(TIME_ZONE, NTP_SERVER_1, NTP_SERVER_2);
+
+	loadTrackerState();
+	mqtt.begin(MQTT_HOST, MQTT_PORT, MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD, MQTT_BASE_TOPIC, &logger);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -87,6 +129,11 @@ void setupHTTPActions() {
 void health() {
 	JsonDocument rootDoc;
 	rootDoc["status"] = "UP";
+	rootDoc["time_synced"] = timeSynced;
+	rootDoc["mqtt"] = mqtt.connected();
+	rootDoc["queued"] = tracker.queued();
+	rootDoc["dropped"] = tracker.dropped();
+	rootDoc["heap"] = ESP.getFreeHeap();
 	writeJson(200, rootDoc);
 }
 
@@ -152,4 +199,68 @@ void loop()
 	if (wiFiHelper.wiFiOk) {
 		server.handleClient();
 	}
+
+	time_t now = time(nullptr);
+	if (now < TIME_VALID_AFTER) {
+		// no internet time yet: nothing is measured per period and nothing is published
+		return;
+	}
+
+	if ((current_time - energy_check_timer) >= ENERGY_CHECK_INTERVAL_MS) {
+		energy_check_timer = current_time;
+		energyLoop(now);
+	}
+
+	if (wiFiHelper.wiFiOk && WiFi.status() == WL_CONNECTED) {
+		mqtt.loop(current_time, tracker);
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Energy per period  */
+void energyLoop(time_t now) {
+	if (!timeSynced) {
+		timeSynced = true;
+		JsonDocument doc;
+		doc["time"] = (uint32_t) now;
+		logger.info(doc, "Time synced");
+	}
+
+	// the clock keeps running without WiFi, so boundaries are still caught and queued offline
+	if (!tracker.needsReading(now)) {
+		return;
+	}
+
+	float energy = pzem.energy();  // kWh, 1 Wh resolution
+	if (isnan(energy)) {
+		// retried on the next check
+		return;
+	}
+
+	uint8_t queuedBefore = tracker.queued();
+	if (tracker.update(now, (uint32_t) lroundf(energy * 1000.0f))) {
+		saveTrackerState();
+
+		JsonDocument doc;
+		doc["queued"] = tracker.queued();
+		doc["new"] = tracker.queued() - queuedBefore;
+		logger.info(doc, "Energy period boundary");
+	}
+}
+
+void loadTrackerState() {
+	RtcBlob blob;
+	ESP.rtcUserMemoryRead(RTC_STATE_OFFSET, (uint32_t *) &blob, sizeof(blob));
+
+	if (blob.magic == RTC_STATE_MAGIC && blob.crc == crc32(&blob.state, sizeof(blob.state))) {
+		tracker.state = blob.state;
+	}
+}
+
+void saveTrackerState() {
+	RtcBlob blob;
+	blob.magic = RTC_STATE_MAGIC;
+	blob.state = tracker.state;
+	blob.crc = crc32(&blob.state, sizeof(blob.state));
+	ESP.rtcUserMemoryWrite(RTC_STATE_OFFSET, (uint32_t *) &blob, sizeof(blob));
 }
